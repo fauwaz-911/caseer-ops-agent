@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: ops-agent
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: NOTION_API_KEY
+        sync: false
+      - key: NOTION_TASKS_DB_ID
+        sync: false
+      - key: MORNING_HOUR
+        value: "10"
+      - key: MORNING_MINUTE
+        value: "0"
+      - key: EVENING_HOUR
+        value: "18"
+      - key: EVENING_MINUTE
+        value: "0"
+      - key: REMINDER_INTERVAL_MINUTES
+        value: "30"
+      - key: SCHEDULER_TIMEZONE
+        value: "UTC"
+      - key: LOG_DIR
+        value: "logs"
