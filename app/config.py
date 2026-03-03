@@ -1,88 +1,88 @@
 """
-Environment-driven configuration with eager validation at startup.
+Environment-driven configuration.
 
-All required variables are asserted at import time so the application
-fails fast with a clear error instead of silently misbehaving at runtime.
+Design decisions
+────────────────
+• Uses a factory function (load_settings) so os.getenv is called at
+  runtime, not at class-definition time — avoids the frozen-at-import
+  bug common in dataclass-based configs.
+• Returns a frozen (immutable) Settings object — no accidental mutation.
+• validate_settings() is called inside load_settings() so the application
+  always fails fast with a clear message on missing env vars.
+• Module-level `settings` singleton is the only import other modules need.
 """
 
 import os
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
 from dotenv import load_dotenv
 
-from .logger import get_logger
-
 load_dotenv()
-
-log = get_logger(__name__)
-
-_REQUIRED = [
-    "TELEGRAM_BOT_TOKEN",
-    "TELEGRAM_CHAT_ID",
-    "NOTION_API_KEY",
-    "NOTION_TASKS_DB_ID",
-]
 
 
 @dataclass(frozen=True)
 class Settings:
-    # Telegram
-    telegram_bot_token: str
-    telegram_chat_id: str
+    # ── Identity ───────────────────────────────────────────────────────────────
+    WORKSPACE_ID: str
 
-    # Notion
-    notion_api_key: str
-    notion_tasks_db_id: str
+    # ── Notion ─────────────────────────────────────────────────────────────────
+    NOTION_TOKEN: str
+    NOTION_DB_ID: str
 
-    # Scheduler cadence (overridable via env)
-    morning_hour: int = 10
-    morning_minute: int = 0
-    evening_hour: int = 18
-    evening_minute: int = 0
-    reminder_interval_minutes: int = 30
+    # ── Telegram ───────────────────────────────────────────────────────────────
+    TELEGRAM_TOKEN: str
+    TELEGRAM_CHAT_ID: str
 
-    # Telegram retry
-    telegram_max_retries: int = 3
-    telegram_retry_backoff: float = 2.0       # seconds
+    # ── Scheduler ──────────────────────────────────────────────────────────────
+    MORNING_HOUR: int
+    MORNING_MINUTE: int
+    EVENING_HOUR: int
+    EVENING_MINUTE: int
+    REMINDER_INTERVAL_MINUTES: int
+    SCHEDULER_TIMEZONE: str
 
-    # Timezone (for APScheduler)
-    scheduler_timezone: str = "UTC"
+    # ── Telegram retry ─────────────────────────────────────────────────────────
+    TELEGRAM_MAX_RETRIES: int
+    TELEGRAM_RETRY_BACKOFF: float        # base seconds; doubles each attempt
+
+    # ── Logging ────────────────────────────────────────────────────────────────
+    LOG_LEVEL: str
+    LOG_DIR: str
+
+    # ── State persistence ──────────────────────────────────────────────────────
+    STATE_FILE: str                      # JSON file for idempotency cache
+
+
+_REQUIRED_KEYS = ["NOTION_TOKEN", "NOTION_DB_ID", "TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID"]
 
 
 def load_settings() -> Settings:
-    """Validate env vars and return an immutable Settings object."""
-    missing = [k for k in _REQUIRED if not os.getenv(k)]
+    """Read env, validate, return immutable Settings. Raises on missing vars."""
+    missing = [k for k in _REQUIRED_KEYS if not os.getenv(k)]
     if missing:
         raise EnvironmentError(
             f"Missing required environment variables: {', '.join(missing)}\n"
             "Set them in a .env file or your deployment environment."
         )
 
-    settings = Settings(
-        telegram_bot_token=os.environ["TELEGRAM_BOT_TOKEN"],
-        telegram_chat_id=os.environ["TELEGRAM_CHAT_ID"],
-        notion_api_key=os.environ["NOTION_API_KEY"],
-        notion_tasks_db_id=os.environ["NOTION_TASKS_DB_ID"],
-        morning_hour=int(os.getenv("MORNING_HOUR", "10")),
-        morning_minute=int(os.getenv("MORNING_MINUTE", "0")),
-        evening_hour=int(os.getenv("EVENING_HOUR", "18")),
-        evening_minute=int(os.getenv("EVENING_MINUTE", "0")),
-        reminder_interval_minutes=int(os.getenv("REMINDER_INTERVAL_MINUTES", "30")),
-        telegram_max_retries=int(os.getenv("TELEGRAM_MAX_RETRIES", "3")),
-        telegram_retry_backoff=float(os.getenv("TELEGRAM_RETRY_BACKOFF", "2.0")),
-        scheduler_timezone=os.getenv("SCHEDULER_TIMEZONE", "UTC"),
+    return Settings(
+        WORKSPACE_ID               = os.getenv("WORKSPACE_ID", "default"),
+        NOTION_TOKEN               = os.environ["NOTION_TOKEN"],
+        NOTION_DB_ID               = os.environ["NOTION_DB_ID"],
+        TELEGRAM_TOKEN             = os.environ["TELEGRAM_TOKEN"],
+        TELEGRAM_CHAT_ID           = os.environ["TELEGRAM_CHAT_ID"],
+        MORNING_HOUR               = int(os.getenv("MORNING_HOUR", "10")),
+        MORNING_MINUTE             = int(os.getenv("MORNING_MINUTE", "0")),
+        EVENING_HOUR               = int(os.getenv("EVENING_HOUR", "18")),
+        EVENING_MINUTE             = int(os.getenv("EVENING_MINUTE", "0")),
+        REMINDER_INTERVAL_MINUTES  = int(os.getenv("REMINDER_INTERVAL_MINUTES", "30")),
+        SCHEDULER_TIMEZONE         = os.getenv("SCHEDULER_TIMEZONE", "UTC"),
+        TELEGRAM_MAX_RETRIES       = int(os.getenv("TELEGRAM_MAX_RETRIES", "3")),
+        TELEGRAM_RETRY_BACKOFF     = float(os.getenv("TELEGRAM_RETRY_BACKOFF", "2.0")),
+        LOG_LEVEL                  = os.getenv("LOG_LEVEL", "INFO"),
+        LOG_DIR                    = os.getenv("LOG_DIR", "logs"),
+        STATE_FILE                 = os.getenv("STATE_FILE", "logs/reminder_state.json"),
     )
 
-    log.info(
-        "Configuration loaded — morning=%02d:%02d  evening=%02d:%02d  "
-        "reminder_interval=%dm  tz=%s",
-        settings.morning_hour, settings.morning_minute,
-        settings.evening_hour, settings.evening_minute,
-        settings.reminder_interval_minutes,
-        settings.scheduler_timezone,
-    )
-    return settings
 
-
-# Module-level singleton — imported by all other modules
+# ── Module-level singleton ─────────────────────────────────────────────────────
 settings: Settings = load_settings()

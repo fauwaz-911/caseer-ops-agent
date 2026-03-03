@@ -5,14 +5,16 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     envVars:
-      - key: TELEGRAM_BOT_TOKEN
+      - key: NOTION_TOKEN
+        sync: false
+      - key: NOTION_DB_ID
+        sync: false
+      - key: TELEGRAM_TOKEN
         sync: false
       - key: TELEGRAM_CHAT_ID
         sync: false
-      - key: NOTION_API_KEY
-        sync: false
-      - key: NOTION_TASKS_DB_ID
-        sync: false
+      - key: WORKSPACE_ID
+        value: "default"
       - key: MORNING_HOUR
         value: "10"
       - key: MORNING_MINUTE
@@ -25,5 +27,13 @@ services:
         value: "30"
       - key: SCHEDULER_TIMEZONE
         value: "UTC"
+      - key: TELEGRAM_MAX_RETRIES
+        value: "3"
+      - key: TELEGRAM_RETRY_BACKOFF
+        value: "2.0"
+      - key: LOG_LEVEL
+        value: "INFO"
       - key: LOG_DIR
         value: "logs"
+      - key: STATE_FILE
+        value: "logs/reminder_state.json"
