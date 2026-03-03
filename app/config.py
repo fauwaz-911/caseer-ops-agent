@@ -66,9 +66,9 @@ def load_settings() -> Settings:
 
     return Settings(
         WORKSPACE_ID               = os.getenv("WORKSPACE_ID", "default"),
-        NOTION_TOKEN               = os.environ["NOTION_API_KEY"],
-        NOTION_DB_ID               = os.environ["NOTION_TASKS_DB_ID"],
-        TELEGRAM_TOKEN             = os.environ["TELEGRAM_BOT_TOKEN"],
+        NOTION_API_KEY             = os.environ["NOTION_API_KEY"],
+        NOTION_TASKS_DB_ID         = os.environ["NOTION_TASKS_DB_ID"],
+        TELEGRAM_BOT_TOKEN         = os.environ["TELEGRAM_BOT_TOKEN"],
         TELEGRAM_CHAT_ID           = os.environ["TELEGRAM_CHAT_ID"],
         MORNING_HOUR               = int(os.getenv("MORNING_HOUR", "10")),
         MORNING_MINUTE             = int(os.getenv("MORNING_MINUTE", "0")),
