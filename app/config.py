@@ -7,9 +7,14 @@ Design decisions
   runtime, not at class-definition time — avoids the frozen-at-import
   bug common in dataclass-based configs.
 • Returns a frozen (immutable) Settings object — no accidental mutation.
-• validate_settings() is called inside load_settings() so the application
-  always fails fast with a clear message on missing env vars.
 • Module-level `settings` singleton is the only import other modules need.
+
+New in this version
+───────────────────
+• OPENROUTER_API_KEY — required for AI intent parsing and response enrichment
+• OPENROUTER_MODEL   — which free model to use (default: mistral-7b)
+• WEBHOOK_SECRET     — optional token Telegram sends with every update so
+                       we can reject requests that didn't come from Telegram
 """
 
 import os
@@ -42,21 +47,40 @@ class Settings:
 
     # ── Telegram retry ─────────────────────────────────────────────────────────
     TELEGRAM_MAX_RETRIES: int
-    TELEGRAM_RETRY_BACKOFF: float        # base seconds; doubles each attempt
+    TELEGRAM_RETRY_BACKOFF: float
 
     # ── Logging ────────────────────────────────────────────────────────────────
     LOG_LEVEL: str
     LOG_DIR: str
 
     # ── State persistence ──────────────────────────────────────────────────────
-    STATE_FILE: str                      # JSON file for idempotency cache
+    STATE_FILE: str
+
+    # ── AI / OpenRouter ────────────────────────────────────────────────────────
+    OPENROUTER_API_KEY: str             # required — get from openrouter.ai
+    OPENROUTER_BASE_URL: str            # OpenRouter API base (rarely changes)
+    OPENROUTER_MODEL: str               # free model slug for intent parsing
+    OPENROUTER_ENRICH_MODEL: str        # free model for response enrichment
+    OPENROUTER_TIMEOUT: int             # seconds before giving up on AI call
+
+    # ── Telegram Webhook ───────────────────────────────────────────────────────
+    WEBHOOK_BASE_URL: str               # your public Render URL e.g. https://ops-agent.onrender.com
+    WEBHOOK_SECRET: str                 # random token Telegram includes in every update header
 
 
-_REQUIRED_KEYS = ["NOTION_API_KEY", "NOTION_TASKS_DB_ID", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"]
+# Required at startup — app refuses to start without these
+_REQUIRED_KEYS = [
+    "NOTION_API_KEY",
+    "NOTION_TASKS_DB_ID",
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_CHAT_ID",
+    "OPENROUTER_API_KEY",
+    "WEBHOOK_BASE_URL",
+]
 
 
 def load_settings() -> Settings:
-    """Read env, validate, return immutable Settings. Raises on missing vars."""
+    """Read env, validate, return immutable Settings. Raises clearly on missing vars."""
     missing = [k for k in _REQUIRED_KEYS if not os.getenv(k)]
     if missing:
         raise EnvironmentError(
@@ -81,8 +105,19 @@ def load_settings() -> Settings:
         LOG_LEVEL                  = os.getenv("LOG_LEVEL", "INFO"),
         LOG_DIR                    = os.getenv("LOG_DIR", "logs"),
         STATE_FILE                 = os.getenv("STATE_FILE", "logs/reminder_state.json"),
+
+        # AI settings — free OpenRouter models by default
+        OPENROUTER_API_KEY         = os.environ["OPENROUTER_API_KEY"],
+        OPENROUTER_BASE_URL        = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+        OPENROUTER_MODEL           = os.getenv("OPENROUTER_MODEL", "mistralai/mistral-7b-instruct:free"),
+        OPENROUTER_ENRICH_MODEL    = os.getenv("OPENROUTER_ENRICH_MODEL", "mistralai/mistral-7b-instruct:free"),
+        OPENROUTER_TIMEOUT         = int(os.getenv("OPENROUTER_TIMEOUT", "20")),
+
+        # Webhook settings
+        WEBHOOK_BASE_URL           = os.environ["WEBHOOK_BASE_URL"],
+        WEBHOOK_SECRET             = os.getenv("WEBHOOK_SECRET", "ops-agent-webhook-secret"),
     )
 
 
-# ── Module-level singleton ─────────────────────────────────────────────────────
+# ── Module-level singleton — the only import other modules need ───────────────
 settings: Settings = load_settings()
