@@ -25,11 +25,11 @@ class Settings:
     WORKSPACE_ID: str
 
     # ── Notion ─────────────────────────────────────────────────────────────────
-    NOTION_TOKEN: str
-    NOTION_DB_ID: str
+    NOTION_API_KEY: str
+    NOTION_TASKS_DB_ID: str
 
     # ── Telegram ───────────────────────────────────────────────────────────────
-    TELEGRAM_TOKEN: str
+    TELEGRAM_BOT_TOKEN: str
     TELEGRAM_CHAT_ID: str
 
     # ── Scheduler ──────────────────────────────────────────────────────────────
@@ -52,7 +52,7 @@ class Settings:
     STATE_FILE: str                      # JSON file for idempotency cache
 
 
-_REQUIRED_KEYS = ["NOTION_TOKEN", "NOTION_DB_ID", "TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID"]
+_REQUIRED_KEYS = ["NOTION_API_KEY", "NOTION_TASKS_DB_ID", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"]
 
 
 def load_settings() -> Settings:
@@ -66,9 +66,9 @@ def load_settings() -> Settings:
 
     return Settings(
         WORKSPACE_ID               = os.getenv("WORKSPACE_ID", "default"),
-        NOTION_TOKEN               = os.environ["NOTION_TOKEN"],
-        NOTION_DB_ID               = os.environ["NOTION_DB_ID"],
-        TELEGRAM_TOKEN             = os.environ["TELEGRAM_TOKEN"],
+        NOTION_TOKEN               = os.environ["NOTION_API_KEY"],
+        NOTION_DB_ID               = os.environ["NOTION_TASKS_DB_ID"],
+        TELEGRAM_TOKEN             = os.environ["TELEGRAM_BOT_TOKEN"],
         TELEGRAM_CHAT_ID           = os.environ["TELEGRAM_CHAT_ID"],
         MORNING_HOUR               = int(os.getenv("MORNING_HOUR", "10")),
         MORNING_MINUTE             = int(os.getenv("MORNING_MINUTE", "0")),
