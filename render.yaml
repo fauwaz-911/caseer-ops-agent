@@ -5,14 +5,23 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     envVars:
-      - key: NOTION_TOKEN
+      # ── Required secrets (set manually in Render dashboard) ──────────────────
+      - key: NOTION_API_KEY
         sync: false
-      - key: NOTION_DB_ID
+      - key: NOTION_TASKS_DB_ID
         sync: false
-      - key: TELEGRAM_TOKEN
+      - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: TELEGRAM_CHAT_ID
         sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: WEBHOOK_BASE_URL
+        sync: false
+      - key: WEBHOOK_SECRET
+        sync: false
+
+      # ── Optional — safe to commit defaults ───────────────────────────────────
       - key: WORKSPACE_ID
         value: "default"
       - key: MORNING_HOUR
@@ -37,3 +46,9 @@ services:
         value: "logs"
       - key: STATE_FILE
         value: "logs/reminder_state.json"
+      - key: OPENROUTER_MODEL
+        value: "mistralai/mistral-7b-instruct:free"
+      - key: OPENROUTER_ENRICH_MODEL
+        value: "mistralai/mistral-7b-instruct:free"
+      - key: OPENROUTER_TIMEOUT
+        value: "20"
