@@ -87,7 +87,7 @@ def register_webhook() -> None:
     header of every update — we use it to verify requests are really
     from Telegram and not someone else hitting our endpoint.
     """
-    webhook_url = f"{settings.WEBHOOK_BASE_URL}/webhook/telegram"
+    webhook_url = f"{settings.WEBHOOK_BASE_URL.rstrip('/')}/webhook/telegram"
     result = _telegram_api("setWebhook", {
         "url":          webhook_url,
         "secret_token": settings.WEBHOOK_SECRET,
