@@ -28,6 +28,16 @@ log = get_logger(__name__)
 
 _scheduler: BackgroundScheduler | None = None
 
+scheduler.add_job(
+    _ping_self,
+    trigger="interval",
+    minutes=10,
+    id="keepalive",
+)
+
+def _ping_self():
+    import requests
+    requests.get(f"{settings.WEBHOOK_BASE_URL}/health", timeout=5)
 
 # ── Job implementations ───────────────────────────────────────────────────────
 
