@@ -159,7 +159,13 @@ def _single_request(
 
     data = response.json()
     try:
-        text = data["choices"][0]["message"]["content"].strip()
+        content = data["choices"][0]["message"]["content"]
+        if content is None:
+            # Model returned null content — treat as unavailable so fallback triggers
+            raise _ModelUnavailable(f"null content from model={model}")
+        text = content.strip()
+    except _ModelUnavailable:
+        raise
     except (KeyError, IndexError, TypeError) as exc:
         raise OpenRouterError(
             f"Unexpected response shape: {exc} — {str(data)[:300]}"
