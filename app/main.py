@@ -69,11 +69,11 @@ async def lifespan(app: FastAPI):
     # ── Shutdown ──────────────────────────────────────────────────────────────
     log.info("Ops Agent shutting down …")
 
-    try:
-        delete_webhook()
-    except Exception as exc:
-        log.warning("Webhook deletion failed on shutdown: %s", exc)
-
+    # NOTE: We intentionally do NOT delete the webhook on shutdown.
+    # Render redeploys frequently — if we unregister on every shutdown,
+    # messages are lost during the gap before the new instance registers.
+    # Telegram queues messages while the server is down and delivers them
+    # on the next successful POST, so leaving the webhook registered is correct.
     stop_scheduler()
 
 
