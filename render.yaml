@@ -14,7 +14,7 @@ services:
         sync: false
       - key: TELEGRAM_CHAT_ID
         sync: false
-      - key: OPENROUTER_API_KEY
+      - key: GEMINI_API_KEY
         sync: false
       - key: WEBHOOK_BASE_URL
         sync: false
@@ -46,9 +46,7 @@ services:
         value: "logs"
       - key: STATE_FILE
         value: "logs/reminder_state.json"
-      - key: OPENROUTER_MODEL
-        value: "mistralai/mistral-7b-instruct:free"
-      - key: OPENROUTER_ENRICH_MODEL
-        value: "mistralai/mistral-7b-instruct:free"
-      - key: OPENROUTER_TIMEOUT
+      - key: GEMINI_MODEL
+        value: "gemini-2.0-flash"
+      - key: GEMINI_TIMEOUT
         value: "20"

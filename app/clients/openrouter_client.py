@@ -1,19 +1,32 @@
 """
-OpenRouter API client with automatic model fallback.
+OpenRouter API client.
 
-If the configured model returns a 404 (endpoint gone), this client
-automatically tries the next model in the fallback list rather than
-failing immediately. This makes the system resilient to OpenRouter's
-free tier endpoint churn.
+What is OpenRouter?
+───────────────────
+OpenRouter is a unified API gateway that lets you call many different
+LLMs (Mistral, Llama, Gemma, Claude, GPT-4, etc.) through a single
+endpoint using the OpenAI message format. This means we can swap models
+by changing one config value — no code changes needed.
 
-Fallback order
-──────────────
-1. settings.OPENROUTER_MODEL (your configured model)
-2. openrouter/free           (OpenRouter's auto-router — picks any available free model)
-3. deepseek/deepseek-chat:free
-4. google/gemma-3-4b-it:free
+API format
+──────────
+OpenRouter uses the exact same request/response shape as the OpenAI
+chat completions API. The only differences are:
+  • Base URL: https://openrouter.ai/api/v1
+  • Auth header: Authorization: Bearer <OPENROUTER_API_KEY>
+  • Optional header: HTTP-Referer (identifies your app in their dashboard)
 
-As soon as one model succeeds, we stop and return the result.
+Free models
+───────────
+Models ending in :free are rate-limited but cost $0. Good for development
+and low-volume production use. Current good free options:
+  • mistralai/mistral-7b-instruct:free    — fast, good instruction following
+  • meta-llama/llama-3.1-8b-instruct:free — strong reasoning
+  • google/gemma-3-4b-it:free             — lightweight and fast
+
+This module is intentionally low-level — it just makes the HTTP call
+and returns the raw text. The ai_service layer sits on top of this and
+handles prompting, parsing, and business logic.
 """
 
 import requests
@@ -27,100 +40,48 @@ log = get_logger(__name__)
 
 
 class OpenRouterError(OpsAgentError):
-    """Raised when all model fallbacks are exhausted."""
-
-
-# Fallback chain — tried in order when a model returns 404
-# openrouter/free is the auto-router: picks whatever free model is alive right now
-_FALLBACK_MODELS = [
-    "openrouter/free",
-    "deepseek/deepseek-chat:free",
-    "stepfun/step-3.5-flash:free",
-]
+    """Raised when the OpenRouter API returns an error or times out."""
 
 
 def chat_completion(
     system_prompt: str,
     user_message: str,
     model: Optional[str] = None,
-    temperature: float = 0.2,
+    temperature: float = 0.2,      # low temperature = more deterministic/consistent
     max_tokens: int = 512,
 ) -> str:
     """
-    Send a chat completion request to OpenRouter, with automatic fallback.
-
-    Tries the configured model first, then works through _FALLBACK_MODELS
-    until one succeeds. Only raises OpenRouterError if every option fails.
+    Send a chat completion request to OpenRouter and return the response text.
 
     Parameters
     ----------
     system_prompt : Instructions that set the AI's behaviour and output format.
-    user_message  : The actual input to process.
-    model         : Override model slug. Defaults to settings.OPENROUTER_MODEL.
-    temperature   : 0.0 = deterministic, 1.0 = creative.
+    user_message  : The actual input to process (user's message or task data).
+    model         : OpenRouter model slug. Defaults to settings.OPENROUTER_MODEL.
+    temperature   : 0.0 = deterministic, 1.0 = creative. Keep low for parsing.
     max_tokens    : Hard cap on response length.
+
+    Returns
+    -------
+    The assistant's reply as a plain string.
+
+    Raises
+    ------
+    OpenRouterError on any HTTP or network failure.
     """
-    # Build the full list to try: configured model first, then fallbacks
-    # (deduplicate in case configured model is already in fallback list)
-    primary = model or settings.OPENROUTER_MODEL
-    candidates = [primary] + [m for m in _FALLBACK_MODELS if m != primary]
+    # Use the configured model if none explicitly requested
+    selected_model = model or settings.OPENROUTER_MODEL
 
-    last_error = None
+    # Build the standard OpenAI-compatible messages array
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user",   "content": user_message},
+    ]
 
-    for candidate in candidates:
-        try:
-            result = _single_request(
-                system_prompt=system_prompt,
-                user_message=user_message,
-                model=candidate,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-            # Log if we fell back from the primary model
-            if candidate != primary:
-                log.warning(
-                    "Used fallback model %s (primary %s was unavailable)",
-                    candidate, primary,
-                )
-            return result
-
-        except _ModelUnavailable as exc:
-            # 404 — this model is gone, try the next one
-            log.warning("Model %s unavailable, trying next fallback: %s", candidate, exc)
-            last_error = exc
-            continue
-
-        except OpenRouterError:
-            # Non-404 error (auth, timeout, malformed response) — don't retry
-            raise
-
-    # Every candidate failed
-    raise OpenRouterError(
-        f"All OpenRouter models failed. Last error: {last_error}\n"
-        f"Tried: {', '.join(candidates)}"
-    )
-
-
-# ── Internal ──────────────────────────────────────────────────────────────────
-
-class _ModelUnavailable(Exception):
-    """Internal signal: this model returned 404, try the next one."""
-
-
-def _single_request(
-    system_prompt: str,
-    user_message: str,
-    model: str,
-    temperature: float,
-    max_tokens: int,
-) -> str:
-    """Make one HTTP request to OpenRouter. Raises _ModelUnavailable on 404."""
+    # Request payload — identical to OpenAI format
     payload = {
-        "model":       model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user",   "content": user_message},
-        ],
+        "model":       selected_model,
+        "messages":    messages,
         "temperature": temperature,
         "max_tokens":  max_tokens,
     }
@@ -128,11 +89,16 @@ def _single_request(
     headers = {
         "Authorization": f"Bearer {settings.OPENROUTER_API_KEY}",
         "Content-Type":  "application/json",
+        # HTTP-Referer identifies your app in the OpenRouter dashboard
+        # (optional but good practice — helps with debugging usage)
         "HTTP-Referer":  settings.WEBHOOK_BASE_URL,
         "X-Title":       "Ops Agent",
     }
 
-    log.debug("OpenRouter request — model=%s", model)
+    log.debug(
+        "OpenRouter request — model=%s  system_chars=%d  user_chars=%d",
+        selected_model, len(system_prompt), len(user_message),
+    )
 
     try:
         response = requests.post(
@@ -143,33 +109,30 @@ def _single_request(
         )
     except requests.Timeout:
         raise OpenRouterError(
-            f"OpenRouter timed out after {settings.OPENROUTER_TIMEOUT}s (model={model})"
+            f"OpenRouter timed out after {settings.OPENROUTER_TIMEOUT}s "
+            f"(model={selected_model})"
         )
     except requests.RequestException as exc:
         raise OpenRouterError(f"OpenRouter network error: {exc}") from exc
 
-    # 404 = model endpoint gone — signal to try next fallback
-    if response.status_code == 404:
-        raise _ModelUnavailable(response.text[:200])
-
+    # Check HTTP status before trying to parse the body
     if response.status_code != 200:
         raise OpenRouterError(
-            f"OpenRouter HTTP {response.status_code}: {response.text[:300]}"
+            f"OpenRouter returned HTTP {response.status_code}: {response.text[:300]}"
         )
 
     data = response.json()
+
+    # Defensive extraction — the response shape can vary slightly between models
     try:
-        content = data["choices"][0]["message"]["content"]
-        if content is None:
-            # Model returned null content — treat as unavailable so fallback triggers
-            raise _ModelUnavailable(f"null content from model={model}")
-        text = content.strip()
-    except _ModelUnavailable:
-        raise
+        text = data["choices"][0]["message"]["content"].strip()
     except (KeyError, IndexError, TypeError) as exc:
         raise OpenRouterError(
-            f"Unexpected response shape: {exc} — {str(data)[:300]}"
+            f"Unexpected OpenRouter response shape: {exc}  body={str(data)[:300]}"
         ) from exc
 
-    log.debug("OpenRouter response — model=%s  chars=%d", model, len(text))
+    log.debug(
+        "OpenRouter response — model=%s  response_chars=%d",
+        selected_model, len(text),
+    )
     return text

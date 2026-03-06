@@ -45,7 +45,7 @@ import re
 from typing import Optional
 
 from app.models.intent import Intent, VALID_ACTIONS
-from app.clients.openrouter_client import chat_completion, OpenRouterError
+from app.clients.gemini_client import chat_completion, GeminiError as OpenRouterError
 from app.core.exceptions import OpsAgentError
 from app.config import settings
 from app.logger import get_logger

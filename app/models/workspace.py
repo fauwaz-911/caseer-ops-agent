@@ -27,8 +27,8 @@ class Workspace:
         from app.config import settings
         return cls(
             workspace_id     = settings.WORKSPACE_ID,
-            notion_token     = settings.NOTION_API_KEY,        # was: settings.NOTION_TOKEN
-            notion_db_id     = settings.NOTION_TASKS_DB_ID,    # was: settings.NOTION_DB_ID
-            telegram_token   = settings.TELEGRAM_BOT_TOKEN,    # was: settings.TELEGRAM_TOKEN
+            notion_token     = settings.NOTION_API_KEY,        # correct field name
+            notion_db_id     = settings.NOTION_TASKS_DB_ID,    # correct field name
+            telegram_token   = settings.TELEGRAM_BOT_TOKEN,    # correct field name
             telegram_chat_id = settings.TELEGRAM_CHAT_ID,
         )
