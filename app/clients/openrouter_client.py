@@ -35,7 +35,7 @@ class OpenRouterError(OpsAgentError):
 _FALLBACK_MODELS = [
     "openrouter/free",
     "deepseek/deepseek-chat:free",
-    "google/gemma-3-4b-it:free",
+    "stepfun/step-3.5-flash:free",
 ]
 
 
