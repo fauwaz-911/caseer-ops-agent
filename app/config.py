@@ -1,17 +1,26 @@
 """
 Environment-driven configuration.
 
-Design decisions
-────────────────
-• Factory function (load_settings) reads env at runtime, not import time.
-• Returns a frozen (immutable) Settings object — no accidental mutation.
-• Module-level `settings` singleton is the only import other modules need.
+AI provider strategy
+─────────────────────
+The system uses a three-layer fallback for all AI calls:
 
-AI provider
-───────────
-Uses Google Gemini via the OpenAI-compatible API (Google AI Studio).
-Free tier: 1,500 requests/day, 1M tokens/minute — no credit card needed.
-Get your key at: https://aistudio.google.com/apikey
+  Layer 1 — Groq (primary)
+    Free tier: 14,400 req/day on llama-3.1-8b-instant
+    Get key: console.groq.com → API Keys
+
+  Layer 2 — Gemini (secondary)
+    Free tier: 1,500 req/day on gemini-2.0-flash
+    Get key: aistudio.google.com/apikey
+
+  Layer 3 — Rule-based classifier (final fallback)
+    Zero API calls. Keyword pattern matching.
+    Handles common commands even when all APIs are down.
+
+The system never goes fully silent. If Groq and Gemini are both
+exhausted, the rule classifier handles known commands and unknown
+messages get a clear "I can't think right now" response with a
+list of commands the user can try.
 """
 
 import os
@@ -50,36 +59,43 @@ class Settings:
     LOG_LEVEL: str
     LOG_DIR: str
 
-    # ── State persistence ──────────────────────────────────────────────────────
+    # ── State ──────────────────────────────────────────────────────────────────
     STATE_FILE: str
 
-    # ── AI / Gemini ────────────────────────────────────────────────────────────
-    GEMINI_API_KEY: str             # from https://aistudio.google.com/apikey
-    GEMINI_MODEL: str               # stable model ID
-    GEMINI_TIMEOUT: int             # seconds before giving up on AI call
+    # ── AI Layer 1: Groq (primary) ─────────────────────────────────────────────
+    GROQ_API_KEY: str           # console.groq.com — free, 14,400 req/day
+    GROQ_MODEL: str             # llama-3.1-8b-instant = high volume free tier
+    GROQ_TIMEOUT: int
+
+    # ── AI Layer 2: Gemini (secondary) ────────────────────────────────────────
+    GEMINI_API_KEY: str         # aistudio.google.com/apikey — 1,500 req/day free
+    GEMINI_MODEL: str
+    GEMINI_TIMEOUT: int
 
     # ── Telegram Webhook ───────────────────────────────────────────────────────
-    WEBHOOK_BASE_URL: str           # your Render URL e.g. https://ops-agent.onrender.com
-    WEBHOOK_SECRET: str             # random token included in every Telegram update header
+    WEBHOOK_BASE_URL: str
+    WEBHOOK_SECRET: str
 
 
+# App refuses to start without these
 _REQUIRED_KEYS = [
     "NOTION_API_KEY",
     "NOTION_TASKS_DB_ID",
     "TELEGRAM_BOT_TOKEN",
     "TELEGRAM_CHAT_ID",
+    "GROQ_API_KEY",
     "GEMINI_API_KEY",
     "WEBHOOK_BASE_URL",
 ]
 
 
 def load_settings() -> Settings:
-    """Read env, validate, return immutable Settings. Raises clearly on missing vars."""
+    """Read env, validate required keys, return immutable Settings."""
     missing = [k for k in _REQUIRED_KEYS if not os.getenv(k)]
     if missing:
         raise EnvironmentError(
             f"Missing required environment variables: {', '.join(missing)}\n"
-            "Set them in a .env file or your deployment environment."
+            "Set them in your .env file or deployment environment."
         )
 
     return Settings(
@@ -100,12 +116,16 @@ def load_settings() -> Settings:
         LOG_DIR                    = os.getenv("LOG_DIR", "logs"),
         STATE_FILE                 = os.getenv("STATE_FILE", "logs/reminder_state.json"),
 
-        # Gemini — stable free model
+        # Groq — primary AI (high free quota)
+        GROQ_API_KEY               = os.environ["GROQ_API_KEY"],
+        GROQ_MODEL                 = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant"),
+        GROQ_TIMEOUT               = int(os.getenv("GROQ_TIMEOUT", "20")),
+
+        # Gemini — secondary AI (fallback)
         GEMINI_API_KEY             = os.environ["GEMINI_API_KEY"],
         GEMINI_MODEL               = os.getenv("GEMINI_MODEL", "gemini-2.0-flash"),
         GEMINI_TIMEOUT             = int(os.getenv("GEMINI_TIMEOUT", "20")),
 
-        # Webhook
         WEBHOOK_BASE_URL           = os.environ["WEBHOOK_BASE_URL"],
         WEBHOOK_SECRET             = os.getenv("WEBHOOK_SECRET", "ops-agent-webhook-secret"),
     )
