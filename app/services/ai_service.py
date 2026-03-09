@@ -1,88 +1,60 @@
 """
-AI service — three-layer fallback architecture.
+AI service.
 
-Every AI call goes through this priority chain:
+Routes all AI calls through either Gemini or Groq depending on the
+AI_PROVIDER setting. Change AI_PROVIDER env var to switch providers
+with no code change and no redeploy.
 
-  Layer 1 — Groq
-    Primary provider. 14,400 free requests/day on llama-3.1-8b-instant.
-    Fast, reliable, generous quota. Used for all AI calls first.
+Three responsibilities
+──────────────────────
+1. parse_intent(message)    — classify user's Telegram message into a
+                              structured Intent object
+2. enrich_notification(raw) — rewrite plain task data into a polished
+                              Telegram-ready message
+3. free_response(message)   — generate a conversational reply for
+                              general questions
 
-  Layer 2 — Gemini
-    Secondary provider. 1,500 free requests/day on gemini-2.0-flash.
-    Catches Groq failures, rate limits, or quota exhaustion.
-
-  Layer 3 — Rule-based classifier (intent parsing only)
-    Zero external calls. Keyword pattern matching.
-    Handles the 10 most common commands without any API.
-    This layer means the system NEVER goes fully silent for known commands.
-
-The chain is tried in order for each call type:
-  parse_intent()        → Groq → Gemini → Rule classifier → unknown
-  enrich_notification() → Groq → Gemini → original raw text (no crash)
-  free_response()       → Groq → Gemini → static fallback message
+Fallback policy
+───────────────
+If the AI call fails for any reason (timeout, quota, network), every
+function returns a safe fallback — parse_intent returns Intent(unknown),
+enrich_notification returns the original raw text, free_response returns
+a fixed apology string. The system never crashes because the AI failed.
 """
 
 import json
 import re
 from typing import Optional
 
-from app.models.intent import Intent, VALID_ACTIONS
-from app.clients.groq_client import chat_completion as groq_complete, GroqError
-from app.clients.gemini_client import chat_completion as gemini_complete, GeminiError
-from app.services.rule_classifier import classify as rule_classify
 from app.config import settings
+from app.models.intent import Intent, VALID_ACTIONS
+from app.core.exceptions import OpsAgentError
 from app.logger import get_logger
 
 log = get_logger(__name__)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SHARED: LLM call with automatic Groq → Gemini fallback
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Provider routing ──────────────────────────────────────────────────────────
 
-def _llm_call(
-    system_prompt: str,
-    user_message: str,
-    temperature: float = 0.2,
-    max_tokens: int = 512,
-) -> Optional[str]:
+def _chat(system_prompt: str, user_message: str,
+          temperature: float = 0.2, max_tokens: int = 512) -> str:
     """
-    Try Groq first, then Gemini. Returns None if both fail.
+    Route a chat completion call to the configured AI provider.
 
-    This is the only place in the codebase that knows about both providers.
-    All other functions call this and handle the None case themselves.
+    Reads AI_PROVIDER at call time so switching providers only requires
+    an env var change — no restart, no code change.
     """
-    # ── Layer 1: Groq ─────────────────────────────────────────────────────────
-    try:
-        result = groq_complete(
-            system_prompt=system_prompt,
-            user_message=user_message,
-            api_key=settings.GROQ_API_KEY,
-            model=settings.GROQ_MODEL,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            timeout=settings.GROQ_TIMEOUT,
-        )
-        log.debug("AI response via Groq (%s)", settings.GROQ_MODEL)
-        return result
-    except GroqError as exc:
-        log.warning("Groq unavailable — trying Gemini: %s", exc)
+    if settings.AI_PROVIDER == "gemini":
+        from app.clients.gemini_client import chat_completion, GeminiError as _Err
+    else:
+        from app.clients.groq_client import chat_completion, GroqError as _Err
 
-    # ── Layer 2: Gemini ───────────────────────────────────────────────────────
-    try:
-        result = gemini_complete(
-            system_prompt=system_prompt,
-            user_message=user_message,
-            model=settings.GEMINI_MODEL,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-        log.warning("AI response via Gemini fallback (%s)", settings.GEMINI_MODEL)
-        return result
-    except GeminiError as exc:
-        log.warning("Gemini unavailable — both AI providers failed: %s", exc)
-
-    return None  # Both providers failed — caller handles this
+    return chat_completion(
+        system_prompt=system_prompt,
+        user_message=user_message,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -100,94 +72,83 @@ JSON schema:
 {
   "action": "<one of the valid actions listed below>",
   "confidence": <float between 0.0 and 1.0>,
-  "ai_reply": "<optional: short natural language response for free_response or unknown>"
+  "ai_reply": "<optional: a short natural language response for free_response or unknown>"
 }
 
 Valid actions:
-- force_reminder   : Run the reminder engine / check for urgent or overdue tasks
+- force_reminder   : Run the reminder engine / check for urgent tasks
 - morning_brief    : Send the morning task summary
 - evening_brief    : Send the evening wrap-up / end of day summary
 - send_update      : Send the current full task list
 - clear_state      : Reset / clear the reminder state or alerts
 - test_telegram    : Test the Telegram connection / send a ping
 - status           : Report system status, scheduler info, health
-- free_response    : General question or conversation — answer in ai_reply
-- unknown          : Cannot classify — ask for clarification in ai_reply
+- free_response    : General question or conversation — respond in ai_reply
+- unknown          : Cannot confidently classify — ask for clarification in ai_reply
 
 Confidence guide:
-  0.9–1.0 = very clear command
-  0.7–0.9 = likely correct
-  0.5–0.7 = uncertain, lean toward free_response
-  below 0.5 = use unknown
+- 0.9–1.0 : Very clear command
+- 0.7–0.9 : Likely correct
+- 0.5–0.7 : Uncertain — lean toward free_response or unknown
+- Below 0.5: Use unknown
 
 Examples:
-User: "what tasks are overdue?" → {"action":"force_reminder","confidence":0.92,"ai_reply":""}
-User: "send morning brief"      → {"action":"morning_brief","confidence":0.97,"ai_reply":""}
-User: "are you working?"        → {"action":"status","confidence":0.85,"ai_reply":""}
-User: "what's the capital of France?" → {"action":"free_response","confidence":0.99,"ai_reply":"The capital of France is Paris."}
-User: "blah xyz"                → {"action":"unknown","confidence":0.95,"ai_reply":"I didn't understand that. You can ask me to check tasks, send a brief, or check system status."}
+User: "what tasks are overdue?" → {"action": "force_reminder", "confidence": 0.92, "ai_reply": ""}
+User: "send me the morning brief" → {"action": "morning_brief", "confidence": 0.97, "ai_reply": ""}
+User: "are you working?" → {"action": "status", "confidence": 0.85, "ai_reply": ""}
+User: "what's the capital of France?" → {"action": "free_response", "confidence": 0.99, "ai_reply": "The capital of France is Paris."}
+User: "blah blah xyz" → {"action": "unknown", "confidence": 0.95, "ai_reply": "I didn't understand that. You can ask me to check tasks, send a brief, or check system status."}
 """.strip()
 
 
 def parse_intent(message: str) -> Intent:
     """
-    Classify a user message into a structured Intent.
+    Use the AI to classify a user's message into a structured Intent.
 
-    Order:
-      1. Groq  → parse JSON response
-      2. Gemini → parse JSON response
-      3. Rule classifier → keyword matching, no API
-      4. Unknown intent with helpful fallback message
+    Returns Intent(action="unknown") if the AI is unavailable or returns
+    an unparseable response — never raises.
     """
     log.info("Parsing intent for message: %r", message[:100])
 
-    # ── Layers 1 & 2: AI providers ────────────────────────────────────────────
-    raw_response = _llm_call(
-        system_prompt=_INTENT_SYSTEM_PROMPT,
-        user_message=message,
-        temperature=0.1,
-        max_tokens=200,
-    )
-
-    if raw_response:
-        parsed = _parse_json_response(raw_response)
-        if parsed:
-            action = parsed.get("action", "unknown")
-            if action not in VALID_ACTIONS:
-                action = "unknown"
-            intent = Intent(
-                action=action,
-                confidence=float(parsed.get("confidence", 0.5)),
-                raw_message=message,
-                ai_reply=parsed.get("ai_reply", ""),
-            )
-            log.info("Intent parsed via AI  action=%s  confidence=%.2f", intent.action, intent.confidence)
-            return intent
-        log.warning("AI returned unparseable JSON: %r", raw_response[:200])
-
-    # ── Layer 3: Rule-based classifier ────────────────────────────────────────
-    rule_intent = rule_classify(message)
-    if rule_intent:
-        log.warning(
-            "Both AI providers failed — using rule classifier  action=%s",
-            rule_intent.action,
+    try:
+        raw = _chat(
+            system_prompt=_INTENT_SYSTEM_PROMPT,
+            user_message=message,
+            temperature=0.1,
+            max_tokens=200,
         )
-        return rule_intent
+    except Exception as exc:
+        log.warning("AI unavailable for intent parsing: %s", exc)
+        return Intent.unknown(
+            raw_message=message,
+            ai_reply="I'm having trouble thinking right now. Please try again in a moment.",
+        )
 
-    # ── Layer 4: Full fallback — unknown with helpful message ─────────────────
-    log.warning("All layers failed — returning unknown intent for: %r", message[:80])
-    return Intent.unknown(
+    parsed = _parse_json(raw)
+    if not parsed:
+        log.warning("AI returned unparseable JSON: %r", raw[:200])
+        return Intent.unknown(
+            raw_message=message,
+            ai_reply="I had trouble understanding that. Could you rephrase?",
+        )
+
+    action = parsed.get("action", "unknown")
+    if action not in VALID_ACTIONS:
+        log.warning("AI returned invalid action %r — falling back to unknown", action)
+        action = "unknown"
+
+    intent = Intent(
+        action=action,
+        confidence=float(parsed.get("confidence", 0.5)),
         raw_message=message,
-        ai_reply=(
-            "My AI is temporarily unavailable, but I can still handle direct commands.\n\n"
-            "Try one of these:\n"
-            "• <b>check my tasks</b>\n"
-            "• <b>morning brief</b>\n"
-            "• <b>evening brief</b>\n"
-            "• <b>show all tasks</b>\n"
-            "• <b>status</b>"
-        ),
+        ai_reply=parsed.get("ai_reply", ""),
     )
+
+    log.info(
+        "Intent parsed  action=%s  confidence=%.2f  provider=%s",
+        intent.action, intent.confidence, settings.AI_PROVIDER,
+    )
+    return intent
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -195,43 +156,43 @@ def parse_intent(message: str) -> Intent:
 # ─────────────────────────────────────────────────────────────────────────────
 
 _ENRICH_SYSTEM_PROMPT = """
-You are the notification writer for Ops Agent, an AI executive assistant.
+You are the notification writer for an AI executive assistant called Ops Agent.
 
-Rewrite the raw task data as a clear, intelligent, professional message for a busy executive.
+You receive raw task data and rewrite it as a clear, concise, professional
+message for a busy executive.
 
 Rules:
-- Concise — no fluff or filler
-- Preserve all task names and due dates exactly as given — never invent details
-- Use HTML bold (<b>tags</b>) sparingly for emphasis
-- One short priority insight is welcome if relevant
+- Keep it concise — no fluff
+- Preserve all task names and due dates exactly as given
+- Use HTML bold (<b>text</b>) for emphasis, not markdown
+- You may add one short priority recommendation if relevant
 - Maximum 300 words
-- No greetings or sign-offs — just the content
+- Do NOT add greetings or sign-offs
 """.strip()
 
 
 def enrich_notification(raw_text: str, context: str = "") -> str:
     """
-    Rewrite raw task data through AI for a more intelligent notification.
-    Falls back to raw_text unchanged if both AI providers fail.
+    Rewrite raw task data through the AI before sending to Telegram.
+
+    Returns raw_text unchanged if the AI is unavailable.
     """
     if not raw_text.strip():
         return raw_text
 
     user_message = f"Context: {context}\n\n{raw_text}" if context else raw_text
 
-    result = _llm_call(
-        system_prompt=_ENRICH_SYSTEM_PROMPT,
-        user_message=user_message,
-        temperature=0.4,
-        max_tokens=400,
-    )
-
-    if result:
-        return result
-
-    # Both providers failed — send the original text rather than nothing
-    log.warning("Notification enrichment failed — using raw text")
-    return raw_text
+    try:
+        enriched = _chat(
+            system_prompt=_ENRICH_SYSTEM_PROMPT,
+            user_message=user_message,
+            temperature=0.4,
+            max_tokens=400,
+        )
+        return enriched
+    except Exception as exc:
+        log.warning("Notification enrichment failed — using raw text: %s", exc)
+        return raw_text
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -249,46 +210,43 @@ Maximum 200 words.
 
 def free_response(message: str) -> str:
     """
-    Generate a conversational AI reply. Falls back to a static message
-    if both providers are unavailable.
+    Generate a conversational reply for general questions.
+
+    Returns a fallback string if the AI is unavailable.
     """
-    result = _llm_call(
-        system_prompt=_FREE_RESPONSE_SYSTEM_PROMPT,
-        user_message=message,
-        temperature=0.6,
-        max_tokens=300,
-    )
-
-    if result:
-        return result
-
-    return (
-        "My AI is temporarily unavailable. I can still run your task reminders, "
-        "briefs, and updates — just send a direct command like "
-        "<b>check my tasks</b> or <b>morning brief</b>."
-    )
+    try:
+        return _chat(
+            system_prompt=_FREE_RESPONSE_SYSTEM_PROMPT,
+            user_message=message,
+            temperature=0.6,
+            max_tokens=300,
+        )
+    except Exception as exc:
+        log.warning("Free response failed: %s", exc)
+        return "I'm having trouble connecting right now. Please try again shortly."
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# INTERNAL HELPERS
+# HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _parse_json_response(text: str) -> Optional[dict]:
+def _parse_json(text: str) -> Optional[dict]:
     """
-    Safely parse JSON from AI output. Strips markdown fences and
-    attempts to extract the first JSON object if the model added
-    surrounding text.
+    Safely extract a JSON object from AI output.
+
+    Handles markdown fences and leading/trailing text that some models add.
+    Returns None if no valid JSON can be extracted.
     """
     # Strip markdown code fences
     text = re.sub(r"```(?:json)?\s*", "", text).replace("```", "").strip()
 
-    # Try direct parse first
+    # Direct parse (happy path)
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
 
-    # Try to find first {...} block
+    # Extract first {...} block if there's surrounding text
     match = re.search(r"\{.*\}", text, re.DOTALL)
     if match:
         try:
