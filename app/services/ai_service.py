@@ -127,7 +127,7 @@ def parse_intent(message: str) -> Intent:
         raw_response = chat_completion(
             system_prompt=_INTENT_SYSTEM_PROMPT,
             user_message=message,
-            model=settings.OPENROUTER_MODEL,
+            model=settings.GEMINI_MODEL,
             temperature=0.1,       # very low — we want consistent, deterministic classification
             max_tokens=200,        # intent JSON is short — no need for more
         )
@@ -222,7 +222,7 @@ def enrich_notification(raw_text: str, context: str = "") -> str:
         enriched = chat_completion(
             system_prompt=_ENRICH_SYSTEM_PROMPT,
             user_message=user_message,
-            model=settings.OPENROUTER_ENRICH_MODEL,
+            model=settings.GEMINI_MODEL,
             temperature=0.4,       # slightly higher — allow natural language variation
             max_tokens=400,
         )
@@ -268,7 +268,7 @@ def free_response(message: str) -> str:
         return chat_completion(
             system_prompt=_FREE_RESPONSE_SYSTEM_PROMPT,
             user_message=message,
-            model=settings.OPENROUTER_MODEL,
+            model=settings.GEMINI_MODEL,
             temperature=0.6,       # more conversational
             max_tokens=300,
         )
