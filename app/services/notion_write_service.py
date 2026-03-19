@@ -1,41 +1,13 @@
 """
-Notion write service.
-
-Handles all write operations to the Notion API:
-  - update_task_status(notion_id, new_status) — change a task's status
-  - add_task(name, due_date)                  — create a new task page
-
-Notion API notes
-────────────────
-• Update a page property: PATCH https://api.notion.com/v1/pages/{page_id}
-• Create a new page:       POST https://api.notion.com/v1/pages
-• Auth header:             Authorization: Bearer {NOTION_API_KEY}
-• Notion version header:   Notion-Version: 2022-06-28
-
-Status property
-───────────────
-Your Notion database uses a "Status" property of type Select.
-Valid values: Pending, In Progress, Stopped, Completed.
-The API requires the exact string — case sensitive.
-
-Task lookup
-───────────
-When the user says "task 1" or "task 2", we look up the notion_id
-from the task_cache table using display_order. When they say a task
-name, we fuzzy-match against the cache.
+Notion write service — update task status, add new tasks.
 """
 
 import requests
-from datetime import datetime, timezone
 from typing import Optional
 
 from app.config import settings
 from app.core.exceptions import NotionError
 from app.logger import get_logger
-
-"""
-Notion write service — update task status, add new tasks.
-"""
 
 log = get_logger(__name__)
 
@@ -55,8 +27,8 @@ def lookup_task(task_ref: str) -> Optional[dict]:
     """
     Look up a task from task_cache by number or name.
 
-    task_ref "1" → display_order=1 (first task in last fetched list)
-    task_ref "plan crypto" → case-insensitive substring match on name
+    Reads all row values INSIDE the session block to avoid
+    SQLAlchemy DetachedInstanceError after session close.
     """
     from app.db.database import get_db
     from app.db.models import TaskCache
@@ -73,15 +45,17 @@ def lookup_task(task_ref: str) -> Optional[dict]:
                 None,
             )
 
-    if not row:
-        return None
+        if not row:
+            return None
 
-    return {
-        "notion_id": row.notion_id,
-        "name":      row.name,
-        "status":    row.status,
-        "due":       row.due,
-    }
+        # Extract all values while session is still open
+        # Accessing row attributes after session closes raises DetachedInstanceError
+        return {
+            "notion_id": row.notion_id,
+            "name":      row.name,
+            "status":    row.status,
+            "due":       row.due,
+        }
 
 
 def update_task_status(notion_id: str, new_status: str) -> None:
@@ -115,11 +89,11 @@ def add_task(name: str, due_date: Optional[str] = None) -> str:
     url = f"{_NOTION_BASE}/pages"
 
     properties = {
-        "Task Name": {                          # your database title property
+        "Task Name": {
             "title": [{"text": {"content": name}}]
         },
         "Status": {
-            "select": {"name": "Pending"}       # default status for new tasks
+            "select": {"name": "Pending"}
         },
     }
 
