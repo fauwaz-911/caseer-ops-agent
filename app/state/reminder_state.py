@@ -1,144 +1,115 @@
 """
-Idempotency cache for the reminder engine.
+Reminder state — database-backed idempotency cache.
 
-Problem it solves
-─────────────────
-Without state, every reminder cycle would re-send alerts for the same
-task. The cache records which (task, urgency_label) pairs have already
-been dispatched so they are not sent again.
+Replaces logs/reminder_state.json with a PostgreSQL table.
 
-Storage
-───────
-JSON file on disk (path from settings.STATE_FILE).
-Survives server restarts, deploys, and cold starts on Render.
+Why this matters
+────────────────
+Previously reminder state was stored in a JSON file that got wiped on
+every Render redeploy. This meant every deploy caused a flood of
+duplicate alerts. The database version survives restarts, redeploys,
+and sleep/wake cycles on Render's free tier.
+
+Logic is identical to the file-based version:
+  • already_sent(task_name, label) → True if alert was sent and not expired
+  • mark_sent(task_name, label)    → record the alert with a TTL
+  • clear_state()                  → wipe all entries (admin action)
 
 TTL
 ───
-Each cache entry carries an expiry timestamp. Entries older than
-ENTRY_TTL_HOURS are evicted on every load. This ensures:
-  • A task that stays overdue for days continues to alert (after TTL).
-  • The cache file doesn't grow forever.
-
-Thread safety
-─────────────
-The scheduler runs jobs on a background thread. All reads/writes are
-protected by a threading.Lock so concurrent access is safe.
-
-Schema (STATE_FILE)
-───────────────────
-{
-  "task_name:label": "2025-03-01T10:00:00+00:00",   ← expiry ISO timestamp
-  ...
-}
+Entries expire after ENTRY_TTL_HOURS (default 24). After expiry, the
+same task will re-alert on the next reminder cycle.
 """
 
-import json
-import os
-import threading
 from datetime import datetime, timezone, timedelta
-from typing import Dict
-
-from app.config import settings
+from app.db.database import get_db
+from app.db.models import ReminderState
 from app.logger import get_logger
 
 log = get_logger(__name__)
 
-# How long before a sent entry is eligible to re-alert
+# How long before a sent alert becomes eligible to re-fire
 ENTRY_TTL_HOURS = 24
 
-_lock = threading.Lock()
-_cache: Dict[str, str] = {}     # key → expiry ISO string
-_loaded = False
-
-
-# ── Internal helpers ──────────────────────────────────────────────────────────
-
-def _state_path() -> str:
-    os.makedirs(os.path.dirname(settings.STATE_FILE), exist_ok=True)
-    return settings.STATE_FILE
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _load() -> None:
-    """Load cache from disk, evicting expired entries in the process."""
-    global _cache, _loaded
-    path = _state_path()
-    raw: Dict[str, str] = {}
-
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                raw = json.load(f)
-        except (json.JSONDecodeError, OSError) as exc:
-            log.warning("Could not load reminder state file (%s) — starting fresh.", exc)
-
-    now = _now()
-    _cache = {
-        k: v for k, v in raw.items()
-        if datetime.fromisoformat(v) > now           # keep only non-expired
-    }
-    evicted = len(raw) - len(_cache)
-    if evicted:
-        log.debug("Evicted %d expired reminder state entries.", evicted)
-    _loaded = True
-
-
-def _save() -> None:
-    path = _state_path()
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(_cache, f, indent=2)
-    except OSError as exc:
-        log.error("Could not persist reminder state: %s", exc)
-
-
-def _ensure_loaded() -> None:
-    global _loaded
-    if not _loaded:
-        _load()
-
-
-# ── Public API ────────────────────────────────────────────────────────────────
 
 def already_sent(task_name: str, label: str) -> bool:
-    """Return True if this (task, label) pair is still within its TTL window."""
-    with _lock:
-        _ensure_loaded()
-        key = f"{task_name}:{label}"
-        expiry_str = _cache.get(key)
-        if not expiry_str:
-            return False
-        return datetime.fromisoformat(expiry_str) > _now()
+    """
+    Return True if this (task_name, label) pair was alerted recently.
+
+    Checks for a non-expired row in the reminder_state table.
+    Expired rows are treated as if they don't exist.
+    """
+    now = datetime.now(timezone.utc)
+    with get_db() as db:
+        row = (
+            db.query(ReminderState)
+            .filter(
+                ReminderState.task_name == task_name,
+                ReminderState.label     == label,
+                ReminderState.expires_at > now,   # only count non-expired
+            )
+            .first()
+        )
+    return row is not None
 
 
 def mark_sent(task_name: str, label: str) -> None:
-    """Record that this alert was sent; set TTL expiry and persist."""
-    with _lock:
-        _ensure_loaded()
-        key = f"{task_name}:{label}"
-        expiry = (_now() + timedelta(hours=ENTRY_TTL_HOURS)).isoformat()
-        _cache[key] = expiry
-        _save()
-        log.debug("Reminder state marked: key=%s  expires=%s", key, expiry)
+    """
+    Record that an alert was sent for this (task_name, label) pair.
+
+    Upserts: if a row already exists (expired or not), update its
+    expires_at. If no row exists, insert a new one.
+    """
+    now     = datetime.now(timezone.utc)
+    expiry  = now + timedelta(hours=ENTRY_TTL_HOURS)
+
+    with get_db() as db:
+        row = (
+            db.query(ReminderState)
+            .filter(
+                ReminderState.task_name == task_name,
+                ReminderState.label     == label,
+            )
+            .first()
+        )
+        if row:
+            # Update expiry on existing row
+            row.expires_at = expiry
+        else:
+            # Insert new row
+            db.add(ReminderState(
+                task_name  = task_name,
+                label      = label,
+                expires_at = expiry,
+                created_at = now,
+            ))
+
+    log.debug("Reminder state marked  task=%r  label=%s  expires=%s",
+              task_name[:50], label, expiry.isoformat())
 
 
 def clear_state() -> None:
-    """Wipe all state. Used by admin endpoint and tests."""
-    global _cache, _loaded
-    with _lock:
-        _cache = {}
-        _loaded = True
-        _save()
-    log.info("Reminder state cleared.")
+    """
+    Delete all reminder state entries.
+
+    Called via DELETE /admin/clear-state. After this, every task will
+    re-alert on the next reminder engine cycle.
+    """
+    with get_db() as db:
+        deleted = db.query(ReminderState).delete()
+    log.info("Reminder state cleared — %d entries deleted.", deleted)
 
 
 def get_state_summary() -> dict:
-    """Return a snapshot of current state for the /health endpoint."""
-    with _lock:
-        _ensure_loaded()
-        now = _now()
-        active = {k: v for k, v in _cache.items() if datetime.fromisoformat(v) > now}
-        return {"active_entries": len(active), "entries": active}
+    """
+    Return a summary of the current reminder state for /admin/health.
+    """
+    now = datetime.now(timezone.utc)
+    with get_db() as db:
+        total   = db.query(ReminderState).count()
+        active  = (
+            db.query(ReminderState)
+            .filter(ReminderState.expires_at > now)
+            .count()
+        )
+    return {"total_entries": total, "active_entries": active}

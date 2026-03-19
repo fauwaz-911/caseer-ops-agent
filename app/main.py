@@ -1,28 +1,17 @@
 """
 Ops Agent — FastAPI application entry point.
 
-Lifespan (startup → shutdown)
-──────────────────────────────
-Startup:
-  1. setup_logging()     — configure console + rotating file handlers
-  2. start_scheduler()   — register and start the 3 background jobs
-  3. register_webhook()  — tell Telegram to POST updates to our URL
+Startup sequence
+────────────────
+1. setup_logging()    — configure console + rotating file handlers
+2. create_tables()    — create DB tables if they don't exist (idempotent)
+3. start_scheduler()  — register and start background jobs
+4. register_webhook() — tell Telegram to POST updates to our URL
 
-Shutdown:
-  4. stop_scheduler()    — gracefully drain and stop background jobs
-
-Note: We intentionally do NOT delete the webhook on shutdown.
-Render redeploys frequently — unregistering on every shutdown means
-messages are lost during the gap before the new instance is ready.
-Telegram queues messages while the server is restarting, so leaving
-the webhook registered is the correct behaviour.
-
-Routing
-───────
-/             → root liveness ping
-/health       → basic uptime check
-/admin/*      → manual control endpoints
-/webhook/*    → Telegram incoming message handler
+Shutdown sequence
+─────────────────
+5. stop_scheduler()   — gracefully stop background jobs
+   (webhook intentionally NOT deleted — survives redeploys)
 """
 
 from contextlib import asynccontextmanager
@@ -43,44 +32,44 @@ _STARTUP_TIME: datetime | None = None
 async def lifespan(app: FastAPI):
     global _STARTUP_TIME
 
-    # ── Startup ───────────────────────────────────────────────────────────────
     setup_logging(log_level=settings.LOG_LEVEL, log_dir=settings.LOG_DIR)
     log = get_logger(__name__)
 
     log.info(
-        "Ops Agent v3 starting — workspace=%s  tz=%s  model=%s",
+        "Ops Agent v3 starting — workspace=%s  tz=%s  model=%s  provider=%s",
         settings.WORKSPACE_ID,
         settings.SCHEDULER_TIMEZONE,
-        settings.GEMINI_MODEL,
+        settings.GROQ_MODEL if settings.AI_PROVIDER == "groq" else settings.GEMINI_MODEL,
+        settings.AI_PROVIDER,
     )
 
     _STARTUP_TIME = datetime.now(timezone.utc)
 
+    # Create database tables (idempotent — safe to run on every startup)
+    try:
+        from app.db.database import create_tables
+        create_tables()
+    except Exception as exc:
+        log.error("Database setup failed: %s", exc)
+        raise   # Don't start if DB is unavailable — all state ops would fail
+
     start_scheduler()
 
-    # Webhook registration can fail on Render free tier if the server isn't
-    # fully ready when the call goes out — we log the error but don't crash.
-    # Set the webhook manually via the Telegram API if this fails.
     try:
         register_webhook()
     except Exception as exc:
-        log.error(
-            "Webhook registration failed at startup (set it manually): %s", exc
-        )
+        log.error("Webhook registration failed at startup (set it manually): %s", exc)
 
     yield
 
-    # ── Shutdown ──────────────────────────────────────────────────────────────
     log.info("Ops Agent shutting down …")
     stop_scheduler()
-    # Webhook intentionally left registered — see module docstring above.
 
 
-# ── App factory ───────────────────────────────────────────────────────────────
 app = FastAPI(
     title="Ops Agent — AI Executive Assistant",
-    description="Notion → Gemini AI → Telegram. Workspace-first, multi-user ready.",
-    version="3.1.0",
+    description="Notion → AI → Telegram. Groq/Gemini. PostgreSQL state.",
+    version="3.2.0",
     lifespan=lifespan,
 )
 
@@ -88,11 +77,9 @@ app.include_router(admin_router)
 app.include_router(webhook_router)
 
 
-# ── Root endpoints ────────────────────────────────────────────────────────────
-
 @app.get("/", tags=["meta"])
 def root():
-    return {"status": "alive", "service": "ops-agent", "version": "3.1.0"}
+    return {"status": "alive", "service": "ops-agent", "version": "3.2.0"}
 
 
 @app.get("/health", tags=["meta"])

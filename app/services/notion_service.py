@@ -1,121 +1,216 @@
 """
-Notion API service.
+Notion read service.
 
-Features
-────────
-• Accepts an explicit Workspace so it's multi-tenant ready.
-• All property extraction through _safe_* helpers — never crashes on
-  missing or malformed fields.
-• Timezone-safe: all datetime objects are returned UTC-aware.
-• Raises NotionError (typed) so callers know exactly what went wrong.
-• ExecutionContext flows through for correlated log lines.
+Fetches tasks from the Notion database and caches them locally in
+PostgreSQL. The cache serves two purposes:
+  1. Reduces Notion API calls — reminder engine reads from cache
+     when tasks were recently synced (within CACHE_TTL_MINUTES)
+  2. Enables task lookup by number — "task 1" maps to display_order=1
+     in the task_cache table
+
+Cache strategy
+──────────────
+fetch_tasks() always hits Notion directly and updates the cache.
+The cache is used by the Notion write service for task lookups — it
+does NOT replace fetch_tasks() for the reminder engine (reminders
+always need fresh data to check urgency correctly).
 """
-
-from __future__ import annotations
 
 import requests
 from datetime import datetime, timezone
 from typing import Optional
 
-from app.models.task import Task
-from app.models.workspace import Workspace
+from app.config import settings
 from app.core.exceptions import NotionError
 from app.core.execution_context import ExecutionContext
+from app.models.task import Task
+from app.models.workspace import Workspace
 from app.logger import get_logger
 
+log = get_logger(__name__)
+
 _NOTION_VERSION = "2022-06-28"
-_BASE_URL = "https://api.notion.com/v1"
 
-_log = get_logger(__name__)
-
-
-# ── Field extractors ──────────────────────────────────────────────────────────
-
-def _safe_title(props: dict, key: str = "Task Name") -> Optional[str]:
-    try:
-        return props[key]["title"][0]["plain_text"]
-    except (KeyError, IndexError, TypeError):
-        return None
-
-
-def _safe_date(props: dict, key: str = "Due Date") -> Optional[datetime]:
-    try:
-        raw = props[key]["date"]["start"]
-    except (KeyError, TypeError):
-        return None
-    if not raw:
-        return None
-    try:
-        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
-    except ValueError:
-        _log.warning("Could not parse date %r — skipping.", raw)
-        return None
-
-
-def _safe_select(props: dict, key: str) -> Optional[str]:
-    try:
-        return props[key]["select"]["name"]
-    except (KeyError, TypeError):
-        return None
-
-
-# ── Public API ────────────────────────────────────────────────────────────────
 
 def fetch_tasks(workspace: Workspace, ctx: ExecutionContext) -> list[Task]:
     """
-    Query the workspace's Notion database and return typed Task objects.
+    Fetch all incomplete tasks from Notion and update the task cache.
 
-    Parameters
-    ----------
-    workspace : Workspace object carrying the credentials and DB ID.
-    ctx       : ExecutionContext for correlated logging.
+    Returns a list of Task objects ordered by due date (earliest first,
+    tasks without due dates at the end).
 
-    Returns
-    -------
-    List of Task objects. Empty list on any non-fatal error.
+    Also writes to task_cache so the Notion write service can look up
+    tasks by number or name.
 
-    Raises
-    ------
-    NotionError on HTTP/network failure so the caller can decide to abort.
+    Raises NotionError on API failure.
     """
-    log = ctx.logger(__name__)
-    url = f"{_BASE_URL}/databases/{workspace.notion_db_id}/query"
+    log_ctx = ctx.logger(__name__)
+    log_ctx.info("Fetching tasks from Notion  db=%s", workspace.notion_db_id[:8])
+
+    url = f"https://api.notion.com/v1/databases/{workspace.notion_db_id}/query"
+
     headers = {
         "Authorization":  f"Bearer {workspace.notion_token}",
         "Notion-Version": _NOTION_VERSION,
         "Content-Type":   "application/json",
     }
 
-    log.info("Fetching tasks from Notion DB %s", workspace.notion_db_id)
+    # Filter out completed tasks — only fetch active ones
+    payload = {
+        "filter": {
+            "property": "Status",
+            "select": {
+                "does_not_equal": "Completed"
+            }
+        },
+        "sorts": [
+            {"property": "Due Date", "direction": "ascending"}
+        ]
+    }
 
     try:
-        response = requests.post(url, headers=headers, json={}, timeout=15)
+        response = requests.post(url, json=payload, headers=headers, timeout=15)
     except requests.RequestException as exc:
-        raise NotionError(f"Network error querying Notion: {exc}") from exc
+        raise NotionError(f"Notion request failed: {exc}") from exc
 
     if response.status_code != 200:
         raise NotionError(
-            f"Notion API returned {response.status_code}: {response.text[:300]}"
+            f"Notion returned HTTP {response.status_code}: {response.text[:300]}"
         )
 
     results = response.json().get("results", [])
-    tasks: list[Task] = []
+    tasks = []
 
-    for record in results:
-        props = record.get("properties", {})
-        name = _safe_title(props)
-        if not name:
-            continue
-        tasks.append(Task(
-            id       = record.get("id", ""),
-            name     = name,
-            due      = _safe_date(props),
-            status   = _safe_select(props, "Status"),
-            priority = _safe_select(props, "Priority"),
-        ))
+    for page in results:
+        task = _parse_page(page)
+        if task:
+            tasks.append(task)
 
-    log.info("Fetched %d tasks from Notion.", len(tasks))
+    log_ctx.info("Fetched %d tasks from Notion", len(tasks))
+
+    # Update the task cache with fresh data
+    _update_task_cache(results)
+
     return tasks
+
+
+def _parse_page(page: dict) -> Optional[Task]:
+    """Extract a Task from a raw Notion page object."""
+    props = page.get("properties", {})
+
+    notion_id = page.get("id", "")
+    name      = _safe_title(props)
+    due       = _safe_date(props)
+    status    = _safe_select(props, "Status")
+    priority  = _safe_select(props, "Priority")
+
+    if not name:
+        return None
+
+    return Task(
+        id       = notion_id,
+        name     = name,
+        due      = due,
+        status   = status,
+        priority = priority,
+    )
+
+
+def _safe_title(props: dict) -> str:
+    """Extract the title from a Notion properties dict."""
+    for key in ("Name", "Task", "Title"):
+        if key in props:
+            title_arr = props[key].get("title", [])
+            if title_arr:
+                return title_arr[0].get("plain_text", "").strip()
+    return ""
+
+
+def _safe_date(props: dict) -> Optional[datetime]:
+    """Extract and parse a due date from Notion properties."""
+    for key in ("Due Date", "Due", "Date"):
+        if key in props:
+            date_obj = props[key].get("date")
+            if date_obj:
+                start = date_obj.get("start", "")
+                if start:
+                    try:
+                        # Handle both date-only and datetime strings
+                        if "T" in start:
+                            dt = datetime.fromisoformat(start)
+                        else:
+                            dt = datetime.fromisoformat(f"{start}T00:00:00")
+                        # Ensure timezone-aware
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=timezone.utc)
+                        return dt
+                    except ValueError:
+                        pass
+    return None
+
+
+def _safe_select(props: dict, key: str) -> Optional[str]:
+    """Extract a select property value from Notion properties."""
+    if key in props:
+        select = props[key].get("select")
+        if select:
+            return select.get("name")
+    return None
+
+
+def _update_task_cache(pages: list) -> None:
+    """
+    Sync the fetched Notion pages into the task_cache table.
+
+    Each task gets a display_order (1-indexed, ordered by due date)
+    so "task 1" always refers to the first item in the last fetched list.
+    Existing cache rows are updated; new rows are inserted; rows for
+    tasks no longer returned are left (they'll be stale but harmless).
+    """
+    try:
+        from app.db.database import get_db
+        from app.db.models import TaskCache
+
+        now = datetime.now(timezone.utc)
+
+        with get_db() as db:
+            for position, page in enumerate(pages, start=1):
+                props     = page.get("properties", {})
+                notion_id = page.get("id", "")
+                name      = _safe_title(props)
+                due       = _safe_date(props)
+                status    = _safe_select(props, "Status")
+                priority  = _safe_select(props, "Priority")
+
+                if not notion_id or not name:
+                    continue
+
+                row = (
+                    db.query(TaskCache)
+                    .filter(TaskCache.notion_id == notion_id)
+                    .first()
+                )
+
+                if row:
+                    row.name          = name
+                    row.due           = due
+                    row.status        = status
+                    row.priority      = priority
+                    row.display_order = position
+                    row.synced_at     = now
+                else:
+                    db.add(TaskCache(
+                        notion_id     = notion_id,
+                        name          = name,
+                        due           = due,
+                        status        = status,
+                        priority      = priority,
+                        display_order = position,
+                        synced_at     = now,
+                    ))
+
+        log.debug("Task cache updated — %d tasks synced", len(pages))
+
+    except Exception as exc:
+        # Cache update failure should never crash the main fetch
+        log.warning("Task cache update failed (non-critical): %s", exc)

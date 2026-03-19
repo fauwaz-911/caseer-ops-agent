@@ -1,35 +1,20 @@
 """
 Intent model.
 
-When a user sends a message to the bot, the AI parses it and returns
-a structured Intent object. The webhook router then uses this object
-to decide what to do — act immediately, ask for confirmation, or reply.
+Structured result of parsing a user's Telegram message via AI.
 
-Intent types
-────────────
-  FORCE_REMINDER   → run the reminder engine right now
-  MORNING_BRIEF    → send the morning task summary
-  EVENING_BRIEF    → send the evening task summary
-  SEND_UPDATE      → send current full task list
-  CLEAR_STATE      → wipe the idempotency cache
-  TEST_TELEGRAM    → send a connectivity ping
-  STATUS           → report scheduler and system health
-  FREE_RESPONSE    → general question — AI answers directly, no system action
-  UNKNOWN          → could not understand the message
-
-Confirmation policy
+New in this version
 ───────────────────
-Scheduled jobs (morning_brief, evening_brief, reminder_engine) run
-automatically on their schedule without asking. But if YOU trigger
-any action manually through the chat, the system confirms first —
-UNLESS the action is explicitly a direct command like "yes", "confirm",
-or "do it". This is controlled by the `requires_confirmation` flag
-on each intent type.
+  update_task  → change the status of an existing Notion task
+  add_task     → create a new task in Notion
 
-Why a dataclass and not a dict?
-────────────────────────────────
-Type safety — the rest of the code can rely on .action, .confidence,
-.requires_confirmation existing. No KeyError surprises.
+Both new intents carry structured parameters the AI extracts:
+  update_task: { "task_ref": "1" or "task name", "new_status": "Completed" }
+  add_task:    { "task_name": "review deck", "due_date": "2026-03-22" or null }
+
+Valid Notion status values
+──────────────────────────
+  Pending, In Progress, Stopped, Completed
 """
 
 from __future__ import annotations
@@ -37,8 +22,6 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
-# Every possible action the system can take
-# These string values are what the AI is prompted to return
 VALID_ACTIONS = {
     "force_reminder",
     "morning_brief",
@@ -47,13 +30,13 @@ VALID_ACTIONS = {
     "clear_state",
     "test_telegram",
     "status",
+    "update_task",      # change task status in Notion
+    "add_task",         # create new task in Notion
     "free_response",
     "unknown",
 }
 
-# Actions that require user confirmation before executing.
-# Scheduled automatic runs bypass this — only manual webhook triggers
-# go through the confirmation flow.
+# Actions that require user confirmation before executing
 ACTIONS_REQUIRING_CONFIRMATION = {
     "force_reminder",
     "morning_brief",
@@ -61,30 +44,32 @@ ACTIONS_REQUIRING_CONFIRMATION = {
     "send_update",
     "clear_state",
     "test_telegram",
+    "update_task",      # always confirm before writing to Notion
+    "add_task",         # always confirm before writing to Notion
 }
+
+# Valid Notion status values — used for validation before API calls
+VALID_NOTION_STATUSES = {"Pending", "In Progress", "Stopped", "Completed"}
 
 
 @dataclass
 class Intent:
-    action: str                         # one of VALID_ACTIONS
-    confidence: float                   # 0.0 → 1.0, how sure the AI is
-    raw_message: str                    # the original user text
-    ai_reply: Optional[str] = None      # AI's free-text reply (for FREE_RESPONSE / low confidence)
-    parameters: dict = field(default_factory=dict)  # reserved for future structured params
+    action: str                          # one of VALID_ACTIONS
+    confidence: float                    # 0.0 → 1.0
+    raw_message: str                     # original user text
+    ai_reply: Optional[str] = None       # for free_response / unknown
+    parameters: dict = field(default_factory=dict)  # structured params for Notion actions
 
     @property
     def requires_confirmation(self) -> bool:
-        """Returns True if this action should ask the user before executing."""
         return self.action in ACTIONS_REQUIRING_CONFIRMATION
 
     @property
     def is_actionable(self) -> bool:
-        """Returns True if there is a concrete system action to run."""
         return self.action not in {"free_response", "unknown"}
 
     @classmethod
     def unknown(cls, raw_message: str, ai_reply: str = "") -> "Intent":
-        """Convenience constructor for unrecognised messages."""
         return cls(
             action="unknown",
             confidence=0.0,

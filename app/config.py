@@ -1,19 +1,9 @@
 """
-Environment-driven configuration.
+Environment-driven configuration for Ops Agent v3.1.0
 
-Design decisions
-────────────────
-• Factory function (load_settings) reads env at runtime, not import time.
-• Returns a frozen (immutable) Settings object — no accidental mutation.
-• Module-level `settings` singleton is the only import other modules need.
-
-AI provider
-───────────
-Set AI_PROVIDER to either "groq" (default) or "gemini".
-Change the env var in Render to switch providers with no code change.
-
-  groq   — console.groq.com — free, 14,400 req/day, no credit card
-  gemini — aistudio.google.com — 1,500 req/day free, pay-as-you-go option
+AI_PROVIDER controls which AI backend is used:
+  AI_PROVIDER=groq   → Groq (14,400 req/day free, no credit card)
+  AI_PROVIDER=gemini → Google Gemini (1,500 req/day free)
 """
 
 import os
@@ -53,32 +43,35 @@ class Settings:
     LOG_DIR: str
 
     # ── State persistence ──────────────────────────────────────────────────────
-    STATE_FILE: str
+    STATE_FILE: str                 # kept for migration fallback only
 
-    # ── AI provider selection ──────────────────────────────────────────────────
-    AI_PROVIDER: str            # "groq" or "gemini" — controls which client is used
+    # ── Database ───────────────────────────────────────────────────────────────
+    DATABASE_URL: str               # Render PostgreSQL Internal Database URL
 
-    # ── Groq (default — free, 14,400 req/day, no credit card) ─────────────────
-    GROQ_API_KEY: str           # from console.groq.com
-    GROQ_MODEL: str             # e.g. llama-3.3-70b-versatile
+    # ── AI provider switch ─────────────────────────────────────────────────────
+    AI_PROVIDER: str                # "groq" or "gemini"
+
+    # ── Groq (console.groq.com — 14,400 req/day free, no credit card) ─────────
+    GROQ_API_KEY: str
+    GROQ_MODEL: str
     GROQ_TIMEOUT: int
 
-    # ── Gemini (Google AI Studio — 1,500 req/day free, pay-as-you-go option) ──
-    GEMINI_API_KEY: str         # from aistudio.google.com/apikey
-    GEMINI_MODEL: str           # e.g. gemini-2.0-flash
+    # ── Gemini (aistudio.google.com — 1,500 req/day free) ─────────────────────
+    GEMINI_API_KEY: str
+    GEMINI_MODEL: str
     GEMINI_TIMEOUT: int
 
     # ── Telegram Webhook ───────────────────────────────────────────────────────
-    WEBHOOK_BASE_URL: str       # your Render URL — no trailing slash
-    WEBHOOK_SECRET: str         # random string sent in every Telegram update header
+    WEBHOOK_BASE_URL: str           # no trailing slash
+    WEBHOOK_SECRET: str
 
 
-# Required at startup — app refuses to start without these
 _REQUIRED_KEYS = [
     "NOTION_API_KEY",
     "NOTION_TASKS_DB_ID",
     "TELEGRAM_BOT_TOKEN",
     "TELEGRAM_CHAT_ID",
+    "DATABASE_URL",
     "WEBHOOK_BASE_URL",
 ]
 
@@ -88,8 +81,7 @@ def load_settings() -> Settings:
     missing = [k for k in _REQUIRED_KEYS if not os.getenv(k)]
     if missing:
         raise EnvironmentError(
-            f"Missing required environment variables: {', '.join(missing)}\n"
-            "Set them in a .env file or your deployment environment."
+            f"Missing required environment variables: {', '.join(missing)}"
         )
 
     return Settings(
@@ -110,6 +102,9 @@ def load_settings() -> Settings:
         LOG_DIR                    = os.getenv("LOG_DIR", "logs"),
         STATE_FILE                 = os.getenv("STATE_FILE", "logs/reminder_state.json"),
 
+        # Database
+        DATABASE_URL               = os.environ["DATABASE_URL"],
+
         # AI provider
         AI_PROVIDER                = os.getenv("AI_PROVIDER", "groq"),
 
@@ -129,5 +124,4 @@ def load_settings() -> Settings:
     )
 
 
-# Module-level singleton — the only import other modules need
 settings: Settings = load_settings()
