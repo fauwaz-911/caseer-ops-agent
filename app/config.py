@@ -1,26 +1,19 @@
 """
 Environment-driven configuration.
 
-AI provider strategy
-─────────────────────
-The system uses a three-layer fallback for all AI calls:
+Design decisions
+────────────────
+• Factory function (load_settings) reads env at runtime, not import time.
+• Returns a frozen (immutable) Settings object — no accidental mutation.
+• Module-level `settings` singleton is the only import other modules need.
 
-  Layer 1 — Groq (primary)
-    Free tier: 14,400 req/day on llama-3.1-8b-instant
-    Get key: console.groq.com → API Keys
+AI provider
+───────────
+Set AI_PROVIDER to either "groq" (default) or "gemini".
+Change the env var in Render to switch providers with no code change.
 
-  Layer 2 — Gemini (secondary)
-    Free tier: 1,500 req/day on gemini-2.0-flash
-    Get key: aistudio.google.com/apikey
-
-  Layer 3 — Rule-based classifier (final fallback)
-    Zero API calls. Keyword pattern matching.
-    Handles common commands even when all APIs are down.
-
-The system never goes fully silent. If Groq and Gemini are both
-exhausted, the rule classifier handles known commands and unknown
-messages get a clear "I can't think right now" response with a
-list of commands the user can try.
+  groq   — console.groq.com — free, 14,400 req/day, no credit card
+  gemini — aistudio.google.com — 1,500 req/day free, pay-as-you-go option
 """
 
 import os
@@ -59,32 +52,33 @@ class Settings:
     LOG_LEVEL: str
     LOG_DIR: str
 
-    # ── State ──────────────────────────────────────────────────────────────────
+    # ── State persistence ──────────────────────────────────────────────────────
     STATE_FILE: str
 
-    # ── AI Layer 1: Groq (primary) ─────────────────────────────────────────────
-    GROQ_API_KEY: str           # console.groq.com — free, 14,400 req/day
-    GROQ_MODEL: str             # llama-3.1-8b-instant = high volume free tier
+    # ── AI provider selection ──────────────────────────────────────────────────
+    AI_PROVIDER: str            # "groq" or "gemini" — controls which client is used
+
+    # ── Groq (default — free, 14,400 req/day, no credit card) ─────────────────
+    GROQ_API_KEY: str           # from console.groq.com
+    GROQ_MODEL: str             # e.g. llama-3.3-70b-versatile
     GROQ_TIMEOUT: int
 
-    # ── AI Layer 2: Gemini (secondary) ────────────────────────────────────────
-    GEMINI_API_KEY: str         # aistudio.google.com/apikey — 1,500 req/day free
-    GEMINI_MODEL: str
+    # ── Gemini (Google AI Studio — 1,500 req/day free, pay-as-you-go option) ──
+    GEMINI_API_KEY: str         # from aistudio.google.com/apikey
+    GEMINI_MODEL: str           # e.g. gemini-2.0-flash
     GEMINI_TIMEOUT: int
 
     # ── Telegram Webhook ───────────────────────────────────────────────────────
-    WEBHOOK_BASE_URL: str
-    WEBHOOK_SECRET: str
+    WEBHOOK_BASE_URL: str       # your Render URL — no trailing slash
+    WEBHOOK_SECRET: str         # random string sent in every Telegram update header
 
 
-# App refuses to start without these
+# Required at startup — app refuses to start without these
 _REQUIRED_KEYS = [
     "NOTION_API_KEY",
     "NOTION_TASKS_DB_ID",
     "TELEGRAM_BOT_TOKEN",
     "TELEGRAM_CHAT_ID",
-    "GROQ_API_KEY",
-    "GEMINI_API_KEY",
     "WEBHOOK_BASE_URL",
 ]
 
@@ -95,7 +89,7 @@ def load_settings() -> Settings:
     if missing:
         raise EnvironmentError(
             f"Missing required environment variables: {', '.join(missing)}\n"
-            "Set them in your .env file or deployment environment."
+            "Set them in a .env file or your deployment environment."
         )
 
     return Settings(
@@ -116,19 +110,24 @@ def load_settings() -> Settings:
         LOG_DIR                    = os.getenv("LOG_DIR", "logs"),
         STATE_FILE                 = os.getenv("STATE_FILE", "logs/reminder_state.json"),
 
-        # Groq — primary AI (high free quota)
-        GROQ_API_KEY               = os.environ["GROQ_API_KEY"],
-        GROQ_MODEL                 = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant"),
+        # AI provider
+        AI_PROVIDER                = os.getenv("AI_PROVIDER", "groq"),
+
+        # Groq
+        GROQ_API_KEY               = os.getenv("GROQ_API_KEY", ""),
+        GROQ_MODEL                 = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
         GROQ_TIMEOUT               = int(os.getenv("GROQ_TIMEOUT", "20")),
 
-        # Gemini — secondary AI (fallback)
-        GEMINI_API_KEY             = os.environ["GEMINI_API_KEY"],
+        # Gemini
+        GEMINI_API_KEY             = os.getenv("GEMINI_API_KEY", ""),
         GEMINI_MODEL               = os.getenv("GEMINI_MODEL", "gemini-2.0-flash"),
         GEMINI_TIMEOUT             = int(os.getenv("GEMINI_TIMEOUT", "20")),
 
+        # Webhook
         WEBHOOK_BASE_URL           = os.environ["WEBHOOK_BASE_URL"],
         WEBHOOK_SECRET             = os.getenv("WEBHOOK_SECRET", "ops-agent-webhook-secret"),
     )
 
 
+# Module-level singleton — the only import other modules need
 settings: Settings = load_settings()
