@@ -36,38 +36,7 @@ from app.logger import get_logger
 log = get_logger(__name__)
 router = APIRouter(prefix="/admin", tags=["admin"])
 
-@router.get("/debug-notion", tags=["admin"])
-def debug_notion():
-    import requests
-    from app.config import settings
 
-    url = f"https://api.notion.com/v1/databases/{settings.NOTION_TASKS_DB_ID}/query"
-    headers = {
-        "Authorization":  f"Bearer {settings.NOTION_API_KEY}",
-        "Notion-Version": "2022-06-28",
-        "Content-Type":   "application/json",
-    }
-    response = requests.post(url, json={"page_size": 3}, headers=headers, timeout=15)
-    data = response.json()
-
-    results = data.get("results", [])
-    if not results:
-        return {"status": response.status_code, "total": 0, "raw": data}
-
-    first = results[0]
-    props = first.get("properties", {})
-    return {
-        "http_status":     response.status_code,
-        "total_returned":  len(results),
-        "property_names":  list(props.keys()),
-        "property_types":  {k: v.get("type") for k, v in props.items()},
-        "raw_properties":  props,
-    }
-```
-
-Push, deploy, then hit:
-```
-GET https://caseer-ops-agent.onrender.com/admin/debug-notion
 
 def _workspace(
     notion_db_id: str | None = None,
@@ -184,3 +153,35 @@ def admin_clear_state():
     """Wipe the idempotency cache. All reminders will re-fire on next cycle."""
     clear_state()
     return {"status": "cleared"}
+@router.get("/debug-notion", tags=["admin"])
+def debug_notion():
+    import requests
+    from app.config import settings
+
+    url = f"https://api.notion.com/v1/databases/{settings.NOTION_TASKS_DB_ID}/query"
+    headers = {
+        "Authorization":  f"Bearer {settings.NOTION_API_KEY}",
+        "Notion-Version": "2022-06-28",
+        "Content-Type":   "application/json",
+    }
+    response = requests.post(url, json={"page_size": 3}, headers=headers, timeout=15)
+    data = response.json()
+
+    results = data.get("results", [])
+    if not results:
+        return {"status": response.status_code, "total": 0, "raw": data}
+
+    first = results[0]
+    props = first.get("properties", {})
+    return {
+        "http_status":     response.status_code,
+        "total_returned":  len(results),
+        "property_names":  list(props.keys()),
+        "property_types":  {k: v.get("type") for k, v in props.items()},
+        "raw_properties":  props,
+    }
+```
+
+Push, deploy, then hit:
+```
+GET https://caseer-ops-agent.onrender.com/admin/debug-notion
