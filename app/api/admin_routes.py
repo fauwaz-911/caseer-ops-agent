@@ -180,8 +180,4 @@ def debug_notion():
         "property_types":  {k: v.get("type") for k, v in props.items()},
         "raw_properties":  props,
     }
-```
 
-Push, deploy, then hit:
-```
-GET https://caseer-ops-agent.onrender.com/admin/debug-notion
